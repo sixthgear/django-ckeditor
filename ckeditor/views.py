@@ -12,7 +12,7 @@ from ckeditor import image_processing
 from ckeditor import utils
 
 
-def get_upload_filename(upload_name, user):
+def get_upload_filename(upload_name, user, prefix=''):
     # If CKEDITOR_RESTRICT_BY_USER is True upload file to user specific path.
     if getattr(settings, 'CKEDITOR_RESTRICT_BY_USER', False):
         user_path = user.username
@@ -24,7 +24,7 @@ def get_upload_filename(upload_name, user):
 
     # Complete upload path (upload_path + date_path).
     upload_path = os.path.join(
-        settings.CKEDITOR_UPLOAD_PATH, user_path, date_path)
+        settings.CKEDITOR_UPLOAD_PATH, user_path, prefix, date_path)
 
     if getattr(settings, "CKEDITOR_UPLOAD_SLUGIFY_FILENAME", True):
         upload_name = utils.slugify_filename(upload_name)
@@ -33,7 +33,7 @@ def get_upload_filename(upload_name, user):
 
 
 @csrf_exempt
-def upload(request):
+def upload(request, image=False):
     """
     Uploads a file and send back its URL to CKEditor.
 
@@ -43,31 +43,58 @@ def upload(request):
     # Get the uploaded file from request.
     upload = request.FILES['upload']
 
-    #Verify that file is a valid image
-    backend = image_processing.get_backend()
-    try:
-        backend.image_verify(upload)
-    except utils.NotAnImageException:
+    # check for image
+    if image and is_image(upload.name):
+
+        #Verify that file is a valid image
+        backend = image_processing.get_backend()
+
+        try:
+            backend.image_verify(upload)
+        except utils.NotAnImageException:
+            return HttpResponse("""
+                <script type='text/javascript'>
+                    alert('Invalid image file.')
+                    window.parent.CKEDITOR.tools.callFunction({0});
+                </script>""".format(request.GET['CKEditorFuncNum']))
+
+        # Open output file in which to store upload.
+        upload_filename = get_upload_filename(upload.name, request.user, prefix='images')
+        saved_path = default_storage.save(upload_filename, upload)
+
+        if backend.should_create_thumbnail(saved_path):
+            backend.create_thumbnail(saved_path)
+
+        url = utils.get_media_url(saved_path)
+
+        # Respond with Javascript sending ckeditor upload url.
         return HttpResponse("""
-                   <script type='text/javascript'>
-                        alert('Invalid image')
-                        window.parent.CKEDITOR.tools.callFunction({0});
-                   </script>""".format(request.GET['CKEditorFuncNum']))
+            <script type='text/javascript'>
+                window.parent.CKEDITOR.tools.callFunction({0}, '{1}');
+            </script>""".format(request.GET['CKEditorFuncNum'], url))
 
-    # Open output file in which to store upload.
-    upload_filename = get_upload_filename(upload.name, request.user)
-    saved_path = default_storage.save(upload_filename, upload)
+    # check for document
+    elif image != True and is_document(upload.name):
+        # Open output file in which to store upload.
+        upload_filename = get_upload_filename(upload.name, request.user, prefix='documents')
+        saved_path = default_storage.save(upload_filename, upload)
+        url = utils.get_media_url(saved_path)
 
-    if backend.should_create_thumbnail(saved_path):
-        backend.create_thumbnail(saved_path)
+        # Respond with Javascript sending ckeditor upload url.
+        return HttpResponse("""
+            <script type='text/javascript'>
+                window.parent.CKEDITOR.tools.callFunction({0}, '{1}');
+            </script>""".format(request.GET['CKEditorFuncNum'], url))
 
-    url = utils.get_media_url(saved_path)
+    # bad file format
+    else:
+        return HttpResponse("""
+            <script type='text/javascript'>
+                alert('Invalid file format.')
+                window.parent.CKEDITOR.tools.callFunction({0});
+            </script>""".format(request.GET['CKEditorFuncNum']))
 
-    # Respond with Javascript sending ckeditor upload url.
-    return HttpResponse("""
-    <script type='text/javascript'>
-        window.parent.CKEDITOR.tools.callFunction({0}, '{1}');
-    </script>""".format(request.GET['CKEditorFuncNum'], url))
+
 
 
 def get_image_files(user=None, path=''):
@@ -107,13 +134,13 @@ def get_image_files(user=None, path=''):
             yield element
 
 
-def get_files_browse_urls(user=None):
+def get_files_browse_urls(user=None, image=False):
     """
     Recursively walks all dirs under upload dir and generates a list of
     thumbnail and full image URL's for each file found.
     """
     files = []
-    for filename in get_image_files(user=user):
+    for filename in get_image_files(user=user, path='images'):
         src = utils.get_media_url(filename)
         if getattr(settings, 'CKEDITOR_IMAGE_BACKEND', None):
             thumb = utils.get_media_url(utils.get_thumb_filename(filename))
@@ -132,9 +159,13 @@ def is_image(path):
     ext = path.split('.')[-1].lower()
     return ext in ['jpg', 'jpeg', 'png', 'gif']
 
+def is_document(path):
+    ext = path.split('.')[-1].lower()
+    return ext in ['pdf', 'doc', 'xls', 'xlsx', 'ppt']
 
-def browse(request):
+
+def browse(request, image=False):
     context = RequestContext(request, {
-        'files': get_files_browse_urls(request.user),
+        'files': get_files_browse_urls(request.user, image=image),
     })
     return render_to_response('browse.html', context)
